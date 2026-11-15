@@ -1,0 +1,16 @@
+# Loki Grid's own Cargo workspace. It is deliberately separate from the GridCraft workspace at the
+# repository root: the FFI crate needs `unsafe`, which the engine workspace forbids.
+[workspace]
+resolver = "3"
+members = ["ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+panic = "unwind" # the FFI layer catches panics at the boundary
