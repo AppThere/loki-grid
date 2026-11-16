@@ -9,6 +9,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "document.inspect", "Inspect Workbook", [], None, "{} → sheets, selection, names, tables, charts, dirty, trust (local|fromFile), history", has_doc, inspect),
         cmd!(query "sheet.read", "Read Range", [], None, "{range?: \"A1:D10\" (default: used range), sheet?, formulas?: bool, formatted?: bool} → rows of values", has_doc, read),
+        cmd!(query "sheet.layout", "Sheet Layout", [], None, "{range?: \"A1:Z40\" (default: the first 40 rows and 26 columns; at most 50,000 cells), sheet?} → {range, cols: [width px], rows: [height px], defaultWidth, defaultHeight, freeze: {rows, cols} | null, merges: [\"B2:C3\"], cells: [{r, c, bold?, italic?, underline?, strike?, color?: \"#RRGGBB\", fill?: \"#RRGGBB\", align?: left|center|right, wrap?, size?: pt}]} the sizes and looks of a window of cells for a front end that draws them (a hidden column or row is 0; only cells whose style is not the default are listed; r and c are zero-based)", has_doc, layout),
         cmd!(query "cell.get", "Get Cell", [], None, "{cell?, sheet?} → value, formula, display text, style, comment, link, python {code, output, typeName, preview, stale}", has_doc, cell_get),
         cmd!(query "selection.stats", "Selection Statistics", [], None, "{} → count, sum, average, min, max", has_doc, sel_stats),
         cmd!(query "history.list", "Undo History", [], None, "{} → undo/redo labels, grouping (an undo group is open)", has_doc, history),
@@ -116,6 +117,87 @@ fn read(s: &mut Session, p: &Json) -> Result<Json> {
     Ok(json!({"range": r.a1(), "sheet": sh.name, "values": rows}))
 }
 
+/// The most cells `sheet.layout` looks at in one call.
+const LAYOUT_CELLS: u64 = 50_000;
+
+fn layout(s: &mut Session, p: &Json) -> Result<Json> {
+    use gridcraft_model::{HAlign, PatternType, StyleId, Underline};
+    let sheet = target_sheet(s, p)?;
+    let d = s.doc()?;
+    let sh = d.wb.sheet(sheet).ok_or(EngineError::NoDocument)?;
+    let r = match str_param(p, "range") {
+        Some(_) => target_range(s, p)?,
+        None => RangeRef::new(CellRef::new(0, 0), CellRef::new(39, 25)),
+    };
+    if u64::from(r.width()) * u64::from(r.height()) > LAYOUT_CELLS {
+        return Err(bad("sheet.layout", "range larger than 50,000 cells; ask for a window"));
+    }
+    let theme = &d.wb.theme;
+    let cols: Vec<Json> = (r.start.col..=r.end.col).map(|c| json!(sh.col_width(c))).collect();
+    let rows: Vec<Json> = (r.start.row..=r.end.row).map(|row| json!(sh.row_height(row))).collect();
+    let merges: Vec<String> = sh.merges.iter().filter(|m| m.intersection(&r).is_some()).map(RangeRef::a1).collect();
+    let mut cells = Vec::new();
+    for row in r.start.row..=r.end.row {
+        for col in r.start.col..=r.end.col {
+            let c = CellRef::new(row, col);
+            let id = sh.style_id(c);
+            if id == StyleId::DEFAULT {
+                continue;
+            }
+            let st = d.wb.styles.get(id);
+            let mut o = serde_json::Map::new();
+            o.insert("r".into(), json!(row));
+            o.insert("c".into(), json!(col));
+            let f = &st.font;
+            if f.bold {
+                o.insert("bold".into(), json!(true));
+            }
+            if f.italic {
+                o.insert("italic".into(), json!(true));
+            }
+            if f.underline != Underline::None {
+                o.insert("underline".into(), json!(true));
+            }
+            if f.strike {
+                o.insert("strike".into(), json!(true));
+            }
+            if let Some(hex) = f.color.hex(theme) {
+                o.insert("color".into(), json!(hex));
+            }
+            if f.size.is_finite() && f.size > 0.0 {
+                o.insert("size".into(), json!(f.size));
+            }
+            if st.fill.pattern == PatternType::Solid
+                && let Some(hex) = st.fill.fg.hex(theme)
+            {
+                o.insert("fill".into(), json!(hex));
+            }
+            match st.align.h {
+                HAlign::Left => o.insert("align".into(), json!("left")),
+                HAlign::Center | HAlign::CenterAcross => o.insert("align".into(), json!("center")),
+                HAlign::Right => o.insert("align".into(), json!("right")),
+                _ => None,
+            };
+            if st.align.wrap {
+                o.insert("wrap".into(), json!(true));
+            }
+            if o.len() > 2 {
+                cells.push(Json::Object(o));
+            }
+        }
+    }
+    Ok(json!({
+        "range": r.a1(),
+        "cols": cols,
+        "rows": rows,
+        "defaultWidth": sh.default_col_width,
+        "defaultHeight": sh.default_row_height,
+        "freeze": sh.freeze.map(|(a, b)| json!({"rows": a, "cols": b})),
+        "merges": merges,
+        "cells": cells,
+    }))
+}
+
 fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = target_sheet(s, p)?;
     let d = s.doc()?;
@@ -172,4 +254,66 @@ fn list_commands(s: &mut Session, p: &Json) -> Result<Json> {
         .map(|c| serde_json::to_value(c).unwrap_or_default())
         .collect();
     Ok(Json::Array(v))
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    fn session() -> Session {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("cell.set", json!({"cell": "B2", "input": "x"})).unwrap();
+        s
+    }
+
+    #[test]
+    fn sizes_looks_merges_and_freeze_of_a_window() {
+        let mut s = session();
+        s.execute("home.bold", json!({"range": "B2"})).unwrap();
+        s.execute("home.fillColor", json!({"range": "B2:C2", "color": "#FFFF00"})).unwrap();
+        s.execute("home.alignRight", json!({"range": "C2"})).unwrap();
+        s.execute("home.columnWidth", json!({"cols": "B:B", "width": 120})).unwrap();
+        s.execute("home.rowHeight", json!({"rows": "3:3", "height": 40})).unwrap();
+        s.execute("home.mergeCells", json!({"range": "E2:F3"})).unwrap();
+        s.execute("view.freezeTopRow", json!({})).unwrap();
+        let r = s.execute("sheet.layout", json!({"range": "A1:F4"})).unwrap();
+        assert_eq!(r["range"], "A1:F4");
+        assert_eq!(r["cols"].as_array().unwrap().len(), 6);
+        assert_eq!(r["rows"].as_array().unwrap().len(), 4);
+        assert_eq!(r["cols"][1], 120.0, "column B is the width set");
+        assert_eq!(r["cols"][0], r["defaultWidth"], "column A is the default");
+        assert_eq!(r["rows"][2], 40.0);
+        assert_eq!(r["merges"], json!(["E2:F3"]));
+        assert_eq!(r["freeze"], json!({"rows": 1, "cols": 0}));
+        let cells = r["cells"].as_array().unwrap();
+        let b2 = cells.iter().find(|c| c["r"] == 1 && c["c"] == 1).expect("B2 is styled");
+        assert_eq!((b2["bold"].as_bool(), b2["fill"].as_str()), (Some(true), Some("#FFFF00")));
+        let c2 = cells.iter().find(|c| c["r"] == 1 && c["c"] == 2).expect("C2 is styled");
+        assert_eq!((c2["align"].as_str(), c2.get("bold")), (Some("right"), None));
+        assert!(cells.iter().all(|c| !(c["r"] == 0 && c["c"] == 0)), "a default cell is not listed");
+    }
+
+    #[test]
+    fn a_hidden_column_is_zero_wide_and_a_huge_window_is_refused() {
+        let mut s = session();
+        s.execute("home.hideColumns", json!({"cols": "C:C"})).unwrap();
+        s.execute("home.hideRows", json!({"rows": "2:2"})).unwrap();
+        let r = s.execute("sheet.layout", json!({"range": "A1:D3"})).unwrap();
+        assert_eq!(r["cols"][2], 0.0, "column C is hidden");
+        assert_eq!(r["rows"][1], 0.0, "row 2 is hidden");
+        assert_ne!(r["cols"][1], 0.0);
+        assert!(s.execute("sheet.layout", json!({"range": "A1:ZZ9999"})).is_err(), "more than 50,000 cells");
+        assert!(s.execute("sheet.layout", json!({"range": "nonsense"})).is_err());
+    }
+
+    #[test]
+    fn it_reads_the_other_sheet_when_asked() {
+        let mut s = session();
+        s.execute("sheet.rename", json!({"name": "One"})).unwrap();
+        let r = s.execute("sheet.layout", json!({"sheet": "One", "range": "A1:B2"})).unwrap();
+        assert_eq!(r["cols"].as_array().unwrap().len(), 2);
+    }
 }

@@ -8,6 +8,8 @@ import app.loki.kit.parseRibbon
 import app.loki.kit.runShotScript
 import kotlinx.serialization.json.Json
 import java.io.File
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -47,7 +49,10 @@ class CoverageTest {
             native?.callRaw("engine.execute", """{"command":"$cmd","params":$params}""")
         }
         runShotScript(File(dir), script) {
-            if (native != null) App(native.borrowed(), surface = { revision, modifier -> EngineSurface(native, revision, modifier, scale = 1f) })
+            if (native != null) App(native.borrowed(), surface = { revision, modifier ->
+                var own by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
+                EngineSurface(native, revision + own, modifier, scale = 1f, onChanged = { own++ })
+            })
             else App(FixtureTransport(raw.toString()))
         }
     }
