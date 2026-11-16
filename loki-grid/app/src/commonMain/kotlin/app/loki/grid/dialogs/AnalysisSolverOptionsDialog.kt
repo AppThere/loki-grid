@@ -52,9 +52,9 @@ fun AnalysisSolverOptionsDialog(onRun: (command: String, params: JsonObject) -> 
             TextButton(onClick = onDismiss) { Text("Cancel") }
             TextButton(onClick = {
                 val params = buildJsonObject {
-                put("bounds", f0)
+                put("requireBounds", f0)
                 }
-                /* TODO: which command this dialog runs was not found */
+                onRun("data.solver", params)
                 onDismiss()
             }) { Text("OK") }
         },

@@ -52,7 +52,7 @@ fun FindGoToDialog(onRun: (command: String, params: JsonObject) -> Unit, onDismi
             TextButton(onClick = onDismiss) { Text("Cancel") }
             TextButton(onClick = {
                 val params = buildJsonObject {
-                if (f0.isNotBlank()) put("r", f0)
+                if (f0.isNotBlank()) put("reference", f0)
                 }
                 onRun("edit.goTo", params)
                 onDismiss()

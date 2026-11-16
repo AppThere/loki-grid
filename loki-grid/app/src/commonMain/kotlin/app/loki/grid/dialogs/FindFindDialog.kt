@@ -58,9 +58,9 @@ fun FindFindDialog(onRun: (command: String, params: JsonObject) -> Unit, onDismi
                 val params = buildJsonObject {
                 if (f0.isNotBlank()) put("what", f0)
                 if (f1.isNotBlank()) put("with", f1)
-                put("case", f2)
-                put("whole", f3)
-                put("wb", f4)
+                put("matchCase", f2)
+                put("wholeCell", f3)
+                if (f4) put("within", "workbook")
                 }
                 onRun("edit.replace", params)
                 onDismiss()

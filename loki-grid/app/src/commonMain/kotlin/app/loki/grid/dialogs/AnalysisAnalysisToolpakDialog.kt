@@ -52,9 +52,9 @@ fun AnalysisAnalysisToolpakDialog(onRun: (command: String, params: JsonObject) -
             TextButton(onClick = onDismiss) { Text("Cancel") }
             TextButton(onClick = {
                 val params = buildJsonObject {
-                if (f0.isNotBlank()) put("t", f0)
+                if (f0.isNotBlank()) put("output", f0)
                 }
-                /* TODO: which command this dialog runs was not found */
+                onRun("data.analysisToolPak", params)
                 onDismiss()
             }) { Text("OK") }
         },

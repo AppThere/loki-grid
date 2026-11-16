@@ -54,7 +54,7 @@ fun PastePasteSpecialDialog(onRun: (command: String, params: JsonObject) -> Unit
                 val params = buildJsonObject {
                 put("b", f0)
                 }
-                /* TODO: which command this dialog runs was not found */
+                onRun("edit.pasteSpecial", params)
                 onDismiss()
             }) { Text("OK") }
         },
