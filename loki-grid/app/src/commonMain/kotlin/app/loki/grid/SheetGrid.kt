@@ -102,10 +102,10 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
     val scope = rememberCoroutineScope()
     val gate = remember { Mutex() }
     val density = LocalDensity.current
-    val colW = with(density) { 96.dp.toPx() }
-    val rowH = with(density) { 26.dp.toPx() }
+    val unit = density.density                  // a size the engine gives in pixels is drawn that many dp
     val hdrW = with(density) { 48.dp.toPx() }
-    val hdrH = rowH
+    val hdrH = with(density) { 24.dp.toPx() }
+    val grab = with(density) { 6.dp.toPx() }
     val slop = LocalViewConfiguration.current.touchSlop
     val longPress = LocalViewConfiguration.current.longPressTimeoutMillis
     val clipboard = LocalClipboardManager.current
@@ -115,8 +115,12 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
     val headStyle = TextStyle(color = colors.onSurfaceVariant, fontSize = 11.sp)
 
     var sel by remember { mutableStateOf(Selection.Start) }
-    var scrollX by remember { mutableFloatStateOf(0f) }
-    var scrollY by remember { mutableFloatStateOf(0f) }
+    var colFirst by remember { mutableStateOf(0) }
+    var colOff by remember { mutableFloatStateOf(0f) }
+    var rowFirst by remember { mutableStateOf(0) }
+    var rowOff by remember { mutableFloatStateOf(0f) }
+    var layout by remember { mutableStateOf(SheetLayout.Empty) }
+    var resizing by remember { mutableStateOf<Resize?>(null) }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var window by remember { mutableStateOf(Window(0, 0, emptyList())) }
     var input by remember { mutableStateOf("") }
@@ -126,12 +130,13 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
 
     val viewW = (viewSize.width - hdrW).coerceAtLeast(1f)
     val viewH = (viewSize.height - hdrH).coerceAtLeast(1f)
-    fun clampX(x: Float) = x.coerceIn(0f, ((MAX_COL + 1) * colW - viewW).coerceAtLeast(0f))
-    fun clampY(y: Float) = y.coerceIn(0f, ((MAX_ROW + 1) * rowH - viewH).coerceAtLeast(0f))
-    val firstCol = (scrollX / colW).toInt()
-    val firstRow = (scrollY / rowH).toInt()
-    val seenCols = (viewW / colW).toInt() + 2
-    val seenRows = (viewH / rowH).toInt() + 2
+    val baseCols = AxisMap(layout.firstCol, layout.colSizes.map { it * unit }, layout.defaultWidth * unit, MAX_COL)
+    val baseRows = AxisMap(layout.firstRow, layout.rowSizes.map { it * unit }, layout.defaultHeight * unit, MAX_ROW)
+    val colMap = resizing?.takeIf { it.isCol }?.let { baseCols.with(it.index, it.size) } ?: baseCols
+    val rowMap = resizing?.takeIf { !it.isCol }?.let { baseRows.with(it.index, it.size) } ?: baseRows
+    // Enough columns and rows to fill the view even when they are narrow.
+    val seenCols = ((viewW / (32f * unit)).toInt() + 2).coerceIn(2, 120)
+    val seenRows = ((viewH / (14f * unit)).toInt() + 2).coerceIn(2, 200)
 
     /** One engine command, one at a time, off the UI thread; a refusal becomes the note under the bar. */
     suspend fun send(command: String, params: JsonObject = JsonObject(emptyMap())): JsonElement? = gate.withLock {
@@ -143,10 +148,8 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
         withContext(Dispatchers.Default) { runCatching { client.call(method, params) }.getOrNull() }
     }
     fun reveal(r: Int, c: Int) {
-        val x0 = c * colW; val x1 = x0 + colW
-        if (x0 < scrollX) scrollX = clampX(x0) else if (x1 > scrollX + viewW) scrollX = clampX(x1 - viewW)
-        val y0 = r * rowH; val y1 = y0 + rowH
-        if (y0 < scrollY) scrollY = clampY(y0) else if (y1 > scrollY + viewH) scrollY = clampY(y1 - viewH)
+        colMap.revealed(colFirst, colOff, c, viewW).let { colFirst = it.first; colOff = it.second }
+        rowMap.revealed(rowFirst, rowOff, r, viewH).let { rowFirst = it.first; rowOff = it.second }
     }
     /** The bar shows the formula, not the value, of the active cell. */
     suspend fun loadInput() {
@@ -186,11 +189,14 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
         onChanged()
     }
 
-    // The window of cells in view, again when the sheet changes or the view moves a cell.
-    LaunchedEffect(revision, firstRow, firstCol, seenRows, seenCols, viewSize) {
+    // The window of cells in view and how they look, again when the sheet changes or the view moves a cell.
+    LaunchedEffect(revision, rowFirst, colFirst, seenRows, seenCols, viewSize) {
         if (viewSize == IntSize.Zero) return@LaunchedEffect
-        val e = read("sheet.read", buildJsonObject { put("range", windowRef(firstRow, firstCol, seenRows, seenCols)); put("formatted", true) })
-        if (e != null) window = Window(firstRow, firstCol, parseSheetValues(e))
+        val range = windowRef(rowFirst, colFirst, seenRows, seenCols)
+        val values = read("sheet.read", buildJsonObject { put("range", range); put("formatted", true) })
+        val look = read("sheet.layout", buildJsonObject { put("range", range) })
+        if (values != null) window = Window(rowFirst, colFirst, parseSheetValues(values))
+        if (look != null) layout = parseLayout(look, rowFirst, colFirst)
     }
     // The engine's selection, when something else (a ribbon command, a shortcut) moved it.
     LaunchedEffect(revision) {
@@ -201,7 +207,7 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
     }
 
     fun cellAt(p: Offset): Pair<Int, Int> =
-        ((p.y - hdrH + scrollY) / rowH).toInt().coerceIn(0, MAX_ROW) to ((p.x - hdrW + scrollX) / colW).toInt().coerceIn(0, MAX_COL)
+        rowMap.at(rowFirst, rowOff, p.y - hdrH) to colMap.at(colFirst, colOff, p.x - hdrW)
 
     fun copyOrCut(cut: Boolean) = go {
         val e = send(if (cut) "edit.cut" else "edit.copy")
@@ -260,7 +266,7 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
             Modifier.fillMaxSize()
                 .onSizeChanged { viewSize = it }
                 .focusRequester(gridFocus).focusable().onPreviewKeyEvent { onKey(it) }
-                .pointerInput(colW, rowH, hdrW, hdrH, viewW, viewH) {
+                .pointerInput(unit, hdrW, hdrH, viewW, viewH) {
                     // The wheel scrolls; Shift turns it sideways.
                     awaitPointerEventScope {
                         while (true) {
@@ -268,14 +274,15 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
                             if (e.type != PointerEventType.Scroll) continue
                             val c = e.changes.firstOrNull() ?: continue
                             val sideways = e.keyboardModifiers.isShiftPressed
-                            val dx = (if (sideways) c.scrollDelta.y else c.scrollDelta.x) * colW / 2
-                            val dy = (if (sideways) 0f else c.scrollDelta.y) * rowH * 1.5f
-                            scrollX = clampX(scrollX + dx); scrollY = clampY(scrollY + dy)
+                            val dx = (if (sideways) c.scrollDelta.y else c.scrollDelta.x) * 32f * unit
+                            val dy = (if (sideways) 0f else c.scrollDelta.y) * 30f * unit
+                            colMap.scrolled(colFirst, colOff, dx).let { colFirst = it.first; colOff = it.second }
+                            rowMap.scrolled(rowFirst, rowOff, dy).let { rowFirst = it.first; rowOff = it.second }
                             c.consume()
                         }
                     }
                 }
-                .pointerInput(colW, rowH, hdrW, hdrH, viewW, viewH) {
+                .pointerInput(unit, hdrW, hdrH, viewW, viewH) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         gridFocus.requestFocus()
@@ -286,6 +293,39 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
                         val onCols = start.y < hdrH && start.x >= hdrW
                         val onRows = start.x < hdrW && start.y >= hdrH
                         if (inCorner) { down.consume(); go { send("edit.selectAll"); val i = read("document.inspect", JsonObject(emptyMap())); parseSelection(i.text("selection"), i.text("activeCell"))?.let { sel = it }; onChanged() }; return@awaitEachGesture }
+                        // A header's border is a handle: drag it to make the column or row wider or taller.
+                        val border = if (onCols) {
+                            val c = colMap.at(colFirst, colOff, start.x - hdrW)
+                            val right = hdrW + colMap.start(colFirst, colOff, c + 1)
+                            val left = hdrW + colMap.start(colFirst, colOff, c)
+                            if (kotlin.math.abs(start.x - right) <= grab) c else if (kotlin.math.abs(start.x - left) <= grab && c > 0) c - 1 else null
+                        } else if (onRows) {
+                            val r = rowMap.at(rowFirst, rowOff, start.y - hdrH)
+                            val bottom = hdrH + rowMap.start(rowFirst, rowOff, r + 1)
+                            val top = hdrH + rowMap.start(rowFirst, rowOff, r)
+                            if (kotlin.math.abs(start.y - bottom) <= grab) r else if (kotlin.math.abs(start.y - top) <= grab && r > 0) r - 1 else null
+                        } else null
+                        if (border != null) {
+                            val before = if (onCols) colMap.size(border) else rowMap.size(border)
+                            down.consume()
+                            var now = before
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                                now = (before + (if (onCols) ch.position.x - start.x else ch.position.y - start.y)).coerceAtLeast(8f * unit)
+                                resizing = Resize(onCols, border, now)
+                                if (!ch.pressed) break
+                                ch.consume()
+                            }
+                            val units = kotlin.math.round(now / unit).toInt()
+                            go {
+                                if (onCols) send("home.columnWidth", buildJsonObject { put("cols", "${colName(border)}:${colName(border)}"); put("width", units) })
+                                else send("home.rowHeight", buildJsonObject { put("rows", "${border + 1}:${border + 1}"); put("height", units) })
+                                onChanged()
+                                resizing = null
+                            }
+                            return@awaitEachGesture
+                        }
                         val anchor = cellAt(start)
                         var current = anchor
                         val extendFrom = if (mods.isShiftPressed) sel.activeRow to sel.activeCol else anchor
@@ -300,7 +340,7 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
                         }
                         fun apply(to: Pair<Int, Int>, last: Boolean) {
                             val rect = rectFor(to)
-                            val row = if (onCols) (scrollY / rowH).toInt() else if (mods.isShiftPressed) sel.activeRow else anchor.first
+                            val row = if (onCols) rowFirst else if (mods.isShiftPressed) sel.activeRow else anchor.first
                             val col = if (onRows) 0 else if (mods.isShiftPressed) sel.activeCol else anchor.second
                             select(others + rect, row, col, last)
                         }
@@ -323,7 +363,8 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
                                 if (panned || (ch.position - start).getDistance() > slop) {
                                     panned = true
                                     val d = ch.position - last
-                                    scrollX = clampX(scrollX - d.x); scrollY = clampY(scrollY - d.y)
+                                    colMap.scrolled(colFirst, colOff, -d.x).let { colFirst = it.first; colOff = it.second }
+                                    rowMap.scrolled(rowFirst, rowOff, -d.y).let { rowFirst = it.first; rowOff = it.second }
                                 }
                             }
                             last = ch.position
@@ -333,65 +374,113 @@ fun SheetGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifi
                 },
         ) {
             val w = size.width; val h = size.height
-            fun text(s: String, x: Float, y: Float, width: Float, style: TextStyle, right: Boolean = false) {
+            // The left edge of each column in view and the top of each row, so the loops below add nothing up twice.
+            val cx = FloatArray(seenCols + 1).also { a -> a[0] = hdrW - colOff; for (i in 1..seenCols) a[i] = a[i - 1] + colMap.size(colFirst + i - 1) }
+            val ry = FloatArray(seenRows + 1).also { a -> a[0] = hdrH - rowOff; for (i in 1..seenRows) a[i] = a[i - 1] + rowMap.size(rowFirst + i - 1) }
+            fun xOf(c: Int) = (hdrW + colMap.start(colFirst, colOff, c)).coerceIn(-4096f, w + 4096f)
+            fun yOf(r: Int) = (hdrH + rowMap.start(rowFirst, rowOff, r)).coerceIn(-4096f, h + 4096f)
+            fun text(s: String, x: Float, y: Float, width: Float, height: Float, style: TextStyle, align: String) {
                 if (s.isEmpty() || width < 4f) return
-                val layout = measurer.measure(s, style, maxLines = 1, overflow = TextOverflow.Clip, constraints = Constraints(maxWidth = width.toInt().coerceAtLeast(1)))
-                val ty = y + (rowH - layout.size.height) / 2
-                val tx = if (right) x + width - layout.size.width else x
-                drawText(layout, topLeft = Offset(tx, ty))
+                val layoutText = measurer.measure(s, style, maxLines = 1, overflow = TextOverflow.Clip, constraints = Constraints(maxWidth = width.toInt().coerceAtLeast(1)))
+                val ty = y + (height - layoutText.size.height) / 2
+                val tx = when (align) { "right" -> x + width - layoutText.size.width; "center" -> x + (width - layoutText.size.width) / 2; else -> x }
+                drawText(layoutText, topLeft = Offset(tx, ty))
             }
-            val offX = scrollX - firstCol * colW
-            val offY = scrollY - firstRow * rowH
+            fun styleFor(look: CellLook?): TextStyle {
+                if (look == null) return cellStyle
+                val deco = listOfNotNull(if (look.underline) androidx.compose.ui.text.style.TextDecoration.Underline else null, if (look.strike) androidx.compose.ui.text.style.TextDecoration.LineThrough else null)
+                return cellStyle.copy(
+                    color = hexColor(look.color) ?: cellStyle.color,
+                    fontWeight = if (look.bold) androidx.compose.ui.text.font.FontWeight.Bold else null,
+                    fontStyle = if (look.italic) androidx.compose.ui.text.font.FontStyle.Italic else null,
+                    textDecoration = if (deco.isEmpty()) null else androidx.compose.ui.text.style.TextDecoration.combine(deco),
+                )
+            }
+            val inMerge = HashSet<Long>()
+            for (m in layout.merges) for (r in m.r0..minOf(m.r1, m.r0 + 200)) for (c in m.c0..minOf(m.c1, m.c0 + 200)) if (r != m.r0 || c != m.c0) inMerge += SheetLayout.key(r, c)
             clipRect(left = hdrW, top = hdrH) {
-                for (r in 0..seenRows) for (c in 0..seenCols) {
-                    val x = hdrW + c * colW - offX; val y = hdrH + r * rowH - offY
-                    val row = firstRow + r; val col = firstCol + c
+                for (r in 0 until seenRows) for (c in 0 until seenCols) {
+                    val row = rowFirst + r; val col = colFirst + c
                     if (row > MAX_ROW || col > MAX_COL) continue
-                    if (sel.covers(row, col)) drawRect(colors.primary.copy(alpha = 0.12f), Offset(x, y), Size(colW, rowH))
-                    drawLine(colors.outlineVariant.copy(alpha = 0.6f), Offset(x, y + rowH), Offset(x + colW, y + rowH), 1f)
-                    drawLine(colors.outlineVariant.copy(alpha = 0.6f), Offset(x + colW, y), Offset(x + colW, y + rowH), 1f)
+                    val x = cx[c]; val y = ry[r]; val cw = cx[c + 1] - x; val ch = ry[r + 1] - y
+                    if (cw <= 0f || ch <= 0f) continue
+                    val look = layout.look(row, col)
+                    hexColor(look?.fill)?.let { drawRect(it, Offset(x, y), Size(cw, ch)) }
+                    if (sel.covers(row, col)) drawRect(colors.primary.copy(alpha = 0.12f), Offset(x, y), Size(cw, ch))
+                    drawLine(colors.outlineVariant.copy(alpha = 0.6f), Offset(x, y + ch), Offset(x + cw, y + ch), 1f)
+                    drawLine(colors.outlineVariant.copy(alpha = 0.6f), Offset(x + cw, y), Offset(x + cw, y + ch), 1f)
+                    if (SheetLayout.key(row, col) in inMerge) continue
                     val s = window.at(row, col)
-                    if (s.isNotEmpty()) text(s, x + 6f, y, colW - 12f, cellStyle, right = s.toDoubleOrNull() != null)
+                    if (s.isNotEmpty()) text(s, x + 6f, y, cw - 12f, ch, styleFor(look), look?.align ?: if (s.toDoubleOrNull() != null) "right" else "left")
+                }
+                // A merged block is one cell: its corner's fill and text over the grid.
+                for (m in layout.merges) {
+                    val x0 = xOf(m.c0); val x1 = xOf(m.c1 + 1); val y0 = yOf(m.r0); val y1 = yOf(m.r1 + 1)
+                    if (x1 < hdrW || y1 < hdrH || x0 > w || y0 > h) continue
+                    val look = layout.look(m.r0, m.c0)
+                    drawRect(hexColor(look?.fill) ?: colors.surface, Offset(x0, y0), Size(x1 - x0, y1 - y0))
+                    if (sel.covers(m.r0, m.c0)) drawRect(colors.primary.copy(alpha = 0.12f), Offset(x0, y0), Size(x1 - x0, y1 - y0))
+                    drawRect(colors.outlineVariant.copy(alpha = 0.6f), Offset(x0, y0), Size(x1 - x0, y1 - y0), style = Stroke(1f))
+                    val s = window.at(m.r0, m.c0)
+                    text(s, x0 + 6f, y0, x1 - x0 - 12f, y1 - y0, styleFor(look), look?.align ?: if (s.toDoubleOrNull() != null) "right" else "center")
                 }
                 // The selection's border, and the active cell's.
                 for (r in sel.rects) {
-                    val x0 = hdrW + r.c0 * colW - scrollX; val y0 = hdrH + r.r0 * rowH - scrollY
-                    val x1 = hdrW + (r.c1 + 1) * colW - scrollX; val y1 = hdrH + (r.r1 + 1) * rowH - scrollY
+                    val x0 = xOf(r.c0); val y0 = yOf(r.r0); val x1 = xOf(r.c1 + 1); val y1 = yOf(r.r1 + 1)
                     drawRect(colors.primary, Offset(x0, y0), Size(x1 - x0, y1 - y0), style = Stroke(2f))
                 }
-                val ax = hdrW + sel.activeCol * colW - scrollX; val ay = hdrH + sel.activeRow * rowH - scrollY
-                drawRect(colors.primary, Offset(ax, ay), Size(colW, rowH), style = Stroke(3f))
+                val merge = layout.merges.firstOrNull { it.contains(sel.activeRow, sel.activeCol) }
+                val ax0 = xOf(merge?.c0 ?: sel.activeCol); val ax1 = xOf((merge?.c1 ?: sel.activeCol) + 1)
+                val ay0 = yOf(merge?.r0 ?: sel.activeRow); val ay1 = yOf((merge?.r1 ?: sel.activeRow) + 1)
+                drawRect(colors.primary, Offset(ax0, ay0), Size(ax1 - ax0, ay1 - ay0), style = Stroke(3f))
             }
             // Headers last, over the cells; those the selection touches are tinted.
             drawRect(colors.surfaceVariant, Offset.Zero, Size(w, hdrH))
             drawRect(colors.surfaceVariant, Offset.Zero, Size(hdrW, h))
             clipRect(left = hdrW, top = 0f, right = w, bottom = hdrH) {
-                for (c in 0..seenCols) {
-                    val col = firstCol + c
+                for (c in 0 until seenCols) {
+                    val col = colFirst + c
                     if (col > MAX_COL) break
-                    val x = hdrW + c * colW - offX
-                    if (sel.rects.any { col in it.c0..it.c1 }) drawRect(colors.primary.copy(alpha = 0.18f), Offset(x, 0f), Size(colW, hdrH))
-                    drawLine(colors.outlineVariant, Offset(x + colW, 0f), Offset(x + colW, hdrH), 1f)
-                    val name = colName(col)
-                    val m = measurer.measure(name, headStyle, maxLines = 1)
-                    drawText(m, topLeft = Offset(x + (colW - m.size.width) / 2, (hdrH - m.size.height) / 2))
+                    val x = cx[c]; val cw = cx[c + 1] - x
+                    if (cw <= 0f) continue
+                    if (sel.rects.any { col in it.c0..it.c1 }) drawRect(colors.primary.copy(alpha = 0.18f), Offset(x, 0f), Size(cw, hdrH))
+                    drawLine(colors.outlineVariant, Offset(x + cw, 0f), Offset(x + cw, hdrH), 1f)
+                    val m = measurer.measure(colName(col), headStyle, maxLines = 1)
+                    drawText(m, topLeft = Offset(x + (cw - m.size.width) / 2, (hdrH - m.size.height) / 2))
                 }
             }
             clipRect(left = 0f, top = hdrH, right = hdrW, bottom = h) {
-                for (r in 0..seenRows) {
-                    val row = firstRow + r
+                for (r in 0 until seenRows) {
+                    val row = rowFirst + r
                     if (row > MAX_ROW) break
-                    val y = hdrH + r * rowH - offY
-                    if (sel.rects.any { row in it.r0..it.r1 }) drawRect(colors.primary.copy(alpha = 0.18f), Offset(0f, y), Size(hdrW, rowH))
-                    drawLine(colors.outlineVariant, Offset(0f, y + rowH), Offset(hdrW, y + rowH), 1f)
+                    val y = ry[r]; val rh = ry[r + 1] - y
+                    if (rh <= 0f) continue
+                    if (sel.rects.any { row in it.r0..it.r1 }) drawRect(colors.primary.copy(alpha = 0.18f), Offset(0f, y), Size(hdrW, rh))
+                    drawLine(colors.outlineVariant, Offset(0f, y + rh), Offset(hdrW, y + rh), 1f)
                     val m = measurer.measure("${row + 1}", headStyle, maxLines = 1)
-                    drawText(m, topLeft = Offset((hdrW - m.size.width) / 2, y + (rowH - m.size.height) / 2))
+                    drawText(m, topLeft = Offset((hdrW - m.size.width) / 2, y + (rh - m.size.height) / 2))
                 }
             }
             drawLine(colors.outline, Offset(hdrW, 0f), Offset(hdrW, h), 1f)
             drawLine(colors.outline, Offset(0f, hdrH), Offset(w, hdrH), 1f)
+            // While a header's border is dragged, the line where it will be.
+            resizing?.let { rz ->
+                if (rz.isCol) { val x = xOf(rz.index + 1); drawLine(colors.primary, Offset(x, 0f), Offset(x, h), 2f) }
+                else { val y = yOf(rz.index + 1); drawLine(colors.primary, Offset(0f, y), Offset(w, y), 2f) }
+            }
         }
     }
+}
+
+/** A column or row whose border is being dragged: which, and how big it is now (pixels). */
+private class Resize(val isCol: Boolean, val index: Int, val size: Float)
+
+/** `#RRGGBB` as a colour; null for anything else. */
+internal fun hexColor(hex: String?): Color? {
+    val h = hex?.trim()?.removePrefix("#") ?: return null
+    if (h.length != 6) return null
+    val v = h.toLongOrNull(16) ?: return null
+    return Color(0xFF000000L or v)
 }
 
 /** Typing a character starts an edit that replaces the cell; a shortcut or a control key is left alone. */
