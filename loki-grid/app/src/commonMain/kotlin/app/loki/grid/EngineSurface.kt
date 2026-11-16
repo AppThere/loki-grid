@@ -106,7 +106,7 @@ fun EngineSurface(native: SurfaceEngine, revision: Int, modifier: Modifier, scal
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
         when {
-            info.kind == "cells" -> CellGrid(client, revision, onChanged, Modifier.fillMaxSize())
+            info.kind == "cells" -> SheetGrid(client, revision, onChanged, Modifier.fillMaxSize())
             pages.isEmpty() -> Text(
                 error ?: if (info.pages == 0) "No document open: File › New." else "",
                 Modifier.align(Alignment.Center), color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -131,95 +131,8 @@ fun EngineSurface(native: SurfaceEngine, revision: Int, modifier: Modifier, scal
     }
 }
 
-private const val GRID_COLS = 26
-private const val GRID_ROWS = 100
-
-private fun colName(c: Int): String {
-    var n = c + 1
-    val sb = StringBuilder()
-    while (n > 0) { val r = (n - 1) % 26; sb.insert(0, 'A' + r); n = (n - 1) / 26 }
-    return sb.toString()
-}
-
 /** `sheet.read`'s rows of values (`{"range": "A1:D3", "values": [[…]]}`), as text, never throwing. */
 fun parseSheetValues(e: JsonElement?): List<List<String>> =
     ((e as? JsonObject)?.get("values") as? JsonArray).orEmpty().map { row ->
         (row as? JsonArray).orEmpty().map { v -> (v as? JsonPrimitive)?.contentOrNull ?: "" }
     }
-
-/** A spreadsheet surface: the active sheet's top-left [GRID_ROWS] × [GRID_COLS], a cell to pick, a bar to type into it. */
-@Composable
-private fun CellGrid(client: EngineClient, revision: Int, onChanged: () -> Unit, modifier: Modifier) {
-    val scope = rememberCoroutineScope()
-    var values by remember { mutableStateOf<List<List<String>>>(emptyList()) }
-    var selRow by remember { mutableIntStateOf(0) }
-    var selCol by remember { mutableIntStateOf(0) }
-    var input by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf<String?>(null) }
-    val ref = "${colName(selCol)}${selRow + 1}"
-    LaunchedEffect(revision) {
-        values = withContext(Dispatchers.Default) {
-            parseSheetValues(runCatching { client.call("sheet.read", buildJsonObject { put("range", "A1:${colName(GRID_COLS - 1)}$GRID_ROWS"); put("formatted", true) }) }.getOrNull())
-        }
-    }
-    fun cellText(r: Int, c: Int) = values.getOrNull(r)?.getOrNull(c).orEmpty()
-    fun select(r: Int, c: Int) {
-        selRow = r; selCol = c
-        val target = "${colName(c)}${r + 1}"
-        scope.launch {
-            withContext(Dispatchers.Default) {
-                runCatching { client.execute("edit.goTo", buildJsonObject { put("reference", target) }) }
-                // The formula, not its value, is what the bar edits.
-                runCatching { client.call("sheet.read", buildJsonObject { put("range", target); put("formulas", true) }) }.getOrNull()
-            }?.let { input = parseSheetValues(it).firstOrNull()?.firstOrNull().orEmpty() }
-        }
-    }
-    fun commit() {
-        scope.launch {
-            note = withContext(Dispatchers.Default) {
-                try { client.execute("cell.set", buildJsonObject { put("cell", ref); put("input", input) }); null } catch (e: EngineException) { e.message }
-            }
-            onChanged()
-        }
-    }
-    val hScroll = rememberScrollState()
-    Column(modifier.background(MaterialTheme.colorScheme.surface)) {
-        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(ref, Modifier.width(56.dp), style = MaterialTheme.typography.labelLarge)
-            OutlinedTextField(
-                input, { input = it }, singleLine = true, modifier = Modifier.weight(1f),
-                placeholder = { Text("Value or =formula") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { commit() }),
-                supportingText = note?.let { { Text(it, color = MaterialTheme.colorScheme.error) } },
-            )
-        }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).horizontalScroll(hScroll)) {
-            Row {
-                HeaderCell("", 40)
-                for (c in 0 until GRID_COLS) HeaderCell(colName(c), 96)
-            }
-            for (r in 0 until GRID_ROWS) {
-                Row {
-                    HeaderCell("${r + 1}", 40)
-                    for (c in 0 until GRID_COLS) {
-                        val picked = r == selRow && c == selCol
-                        Box(
-                            Modifier.width(96.dp).height(26.dp)
-                                .border(if (picked) 2.dp else 0.5.dp, if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
-                                .clickable { select(r, c) }.padding(horizontal = 4.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) { Text(cellText(r, c), maxLines = 1, overflow = TextOverflow.Clip, style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HeaderCell(text: String, width: Int) {
-    Box(
-        Modifier.width(width.dp).height(26.dp).background(MaterialTheme.colorScheme.surfaceVariant).border(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
-        contentAlignment = Alignment.Center,
-    ) { Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-}
