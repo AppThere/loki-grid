@@ -48,6 +48,7 @@ import app.loki.kit.CommandBar
 import app.loki.kit.CommandFormDialog
 import app.loki.kit.CommandInfo
 import app.loki.kit.CraftTheme
+import app.loki.kit.craftTypography
 import app.loki.kit.EngineClient
 import app.loki.kit.EngineException
 import app.loki.kit.EngineTransport
@@ -105,7 +106,7 @@ fun App(
     transport: EngineTransport,
     pickFile: (save: Boolean) -> String? = { null },
     surface: @Composable (revision: Int, modifier: Modifier) -> Unit = { _, modifier -> SurfacePlaceholder(modifier) },
-) = CraftTheme(LightColors, DarkColors, Typography()) { themeChoice, setTheme, _ ->
+) = CraftTheme(LightColors, DarkColors, craftTypography()) { themeChoice, setTheme, _ ->
     val engine = remember(transport) { EngineClient(transport) }
     DisposableEffect(engine) { onDispose { engine.close() } }
     val scope = rememberCoroutineScope()
@@ -184,6 +185,8 @@ fun App(
                     }
                     IconButton(onClick = { showCommands = true }, modifier = Modifier.size(36.dp)) { Icon(Lucide.Search, contentDescription = "Search all commands", modifier = Modifier.size(18.dp)) }
                 },
+                // A wide window shows the whole tab, as Loki Text's ribbon does.
+                expanded = sizeClass == SizeClass.Expanded,
                 onRun = ::run,
             )
             // A smaller window moves a feature, it never removes one: tools and panels go above the surface.
