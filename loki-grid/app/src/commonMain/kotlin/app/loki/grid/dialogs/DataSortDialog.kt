@@ -29,6 +29,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.loki.kit.SheetDialog
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -56,9 +57,13 @@ fun DataSortDialog(onRun: (command: String, params: JsonObject) -> Unit, onDismi
             TextButton(onClick = {
                 val params = buildJsonObject {
                 put("header", f0)
-                if (f1.isNotBlank()) put("col", f1)
-                if (f2.isNotBlank()) put("by", f2)
-                if (f3.isNotBlank()) put("desc", f3)
+                put("keys", buildJsonArray {
+                    add(buildJsonObject {
+                        if (f1.isNotBlank()) put("column", f1)
+                        if (f2.isNotBlank()) put("by", f2)
+                        if (f3.isNotBlank()) put("order", if (f3 == "true") "desc" else "asc")
+                    })
+                })
                 }
                 onRun("data.sort", params)
                 onDismiss()
@@ -73,9 +78,9 @@ fun DataSortDialog(onRun: (command: String, params: JsonObject) -> Unit, onDismi
             OutlinedTextField(f1, { f1 = it }, label = { Text("Sort by") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Text("By", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(f2 == "\"values\".into()", { f2 = "\"values\".into()" }, label = { Text("Cell Values") })
-                FilterChip(f2 == "\"cellColor\".into()", { f2 = "\"cellColor\".into()" }, label = { Text("Cell Color") })
-                FilterChip(f2 == "\"fontColor\".into()", { f2 = "\"fontColor\".into()" }, label = { Text("Font Color") })
+                FilterChip(f2 == "values", { f2 = "values" }, label = { Text("Cell Values") })
+                FilterChip(f2 == "cellColor", { f2 = "cellColor" }, label = { Text("Cell Color") })
+                FilterChip(f2 == "fontColor", { f2 = "fontColor" }, label = { Text("Font Color") })
             }
             Text("Desc", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

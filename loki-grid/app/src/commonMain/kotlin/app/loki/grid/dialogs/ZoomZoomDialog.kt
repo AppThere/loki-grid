@@ -54,7 +54,7 @@ fun ZoomZoomDialog(onRun: (command: String, params: JsonObject) -> Unit, onDismi
                 val params = buildJsonObject {
                 f0.trim().replace(',', '.').toDoubleOrNull()?.let { put("percent", it) }
                 }
-                /* TODO: which command this dialog runs was not found */
+                onRun("view.zoom", params)
                 onDismiss()
             }) { Text("OK") }
         },
