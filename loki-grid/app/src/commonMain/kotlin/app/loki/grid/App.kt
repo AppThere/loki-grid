@@ -36,6 +36,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -106,6 +107,8 @@ fun App(
     transport: EngineTransport,
     pickFile: (save: Boolean) -> String? = { null },
     surface: @Composable (revision: Int, modifier: Modifier) -> Unit = { _, modifier -> SurfacePlaceholder(modifier) },
+    /** Set where the platform has a menu bar (macOS): it shows the engine's menus beside the ribbon, with their key equivalents. */
+    menuBridge: app.loki.kit.MenuBridge? = null,
 ) = CraftTheme(LightColors, DarkColors, craftTypography()) { themeChoice, setTheme, _ ->
     val engine = remember(transport) { EngineClient(transport) }
     DisposableEffect(engine) { onDispose { engine.close() } }
@@ -155,6 +158,15 @@ fun App(
         val (d, o) = parseState(onEngine { commandState() }.getOrNull())
         disabled = d
         on = o
+    }
+    if (menuBridge != null) {
+        SideEffect {
+            menuBridge.catalog = byId
+            menuBridge.ribbon = ribbon
+            menuBridge.disabled = disabled
+            menuBridge.on = on
+            menuBridge.runner = { id -> if (id == app.loki.kit.MENU_COMMANDS) showCommands = true else run(id) }
+        }
     }
 
     if (showCommands) {
