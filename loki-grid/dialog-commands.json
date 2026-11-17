@@ -1,0 +1,7 @@
+{
+  "AnalysisAnalysisToolpak": "data.analysisToolPak",
+  "AnalysisSolverOptions": "data.solver",
+  "InsertFunctionInsertFunction": "formulas.insertFunction",
+  "PastePasteSpecial": "edit.pasteSpecial",
+  "ZoomZoom": "view.zoom"
+}
