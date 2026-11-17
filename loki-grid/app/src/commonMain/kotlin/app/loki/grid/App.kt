@@ -142,7 +142,7 @@ fun App(
 
     fun run(id: String) {
         val c = byId[id] ?: return
-        if (c.needsInput) { form = c; return }
+        if (c.asksFirst) { form = c; return }   // see CommandInfo.asksFirst: a required value, or a label ending in "…"
         scope.launch { execute(c, JsonObject(emptyMap()), show = true)?.let { status = it } }
     }
 
@@ -176,7 +176,7 @@ fun App(
                 hasIcon = { commandIcon(it) != null },
                 icon = { CommandIcon(it) },
                 leading = {
-                    AppMenu(themeChoice, setTheme, onDialog = { dialog = it })
+                    AppMenu(themeChoice, setTheme, onDialog = { d -> val c = d.command?.let { byId[it] }; if (c != null) form = c else dialog = d })
                     // Undo and Redo at every width, as in Loki Text.
                     for (id in listOf(UNDO_COMMAND, REDO_COMMAND)) byId[id]?.let { c ->
                         IconButton(onClick = { run(id) }, enabled = id !in disabled, modifier = Modifier.size(36.dp)) {
@@ -232,8 +232,8 @@ private fun AppMenu(themeChoice: String, setTheme: (String) -> Unit, onDialog: (
             for (choice in listOf("system", "light", "dark")) {
                 DropdownMenuItem(text = { Text((if (choice == themeChoice) "✓ " else "") + "Theme: " + choice.replaceFirstChar { it.uppercase() }) }, onClick = { open = false; setTheme(choice) })
             }
-            if (TRANSLATED_DIALOGS.isNotEmpty()) HorizontalDivider()
-            for (d in TRANSLATED_DIALOGS) DropdownMenuItem(text = { Text(d.title + "…") }, onClick = { open = false; onDialog(d) })
+            if (TRANSLATED_DIALOGS.any { !it.hidden }) HorizontalDivider()
+            for (d in TRANSLATED_DIALOGS.filter { !it.hidden }) DropdownMenuItem(text = { Text(d.title + "…") }, onClick = { open = false; onDialog(d) })
         }
     }
 }
